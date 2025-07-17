@@ -196,9 +196,9 @@ def init_database():
     INSERT OR IGNORE INTO platform_settings (setting_key, setting_value) VALUES
     ('min_bet_amount', '10'),
     ('max_bet_amount', '1000'),
-    ('min_withdrawal_amount', '100'),
+    ('min_withdrawal_amount', '50'),
     ('betting_closes_hours_before_match', '1'),
-    ('welcome_bonus', '100')
+    ('welcome_bonus', '10')
     ''')
     
     conn.commit()
@@ -449,7 +449,7 @@ async def register(user_data: UserCreate):
     
     # Create user with welcome bonus
     hashed_password = hash_password(user_data.password)
-    welcome_bonus = 100.0  # Welcome bonus
+    welcome_bonus = 10.0  # Welcome bonus
     
     cursor.execute(
         "INSERT INTO users (mobile, password, balance) VALUES (?, ?, ?)",
@@ -705,8 +705,8 @@ async def request_deposit(deposit_data: BalanceRequest, current_user: dict = Dep
 async def request_withdrawal(withdrawal_data: WithdrawalRequest, current_user: dict = Depends(get_current_user)):
     """Request withdrawal"""
     # Validate amount
-    if withdrawal_data.amount < 100:
-        raise HTTPException(400, "Minimum withdrawal amount is ₹100")
+    if withdrawal_data.amount < 50:
+        raise HTTPException(400, "Minimum withdrawal amount is ₹50")
     
     if withdrawal_data.amount > current_user['balance']:
         raise HTTPException(400, "Insufficient balance")

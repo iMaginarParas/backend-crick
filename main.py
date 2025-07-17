@@ -72,6 +72,10 @@ class CallOffMatch(BaseModel):
 # ============= DATABASE FUNCTIONS =============
 def init_database():
     """Initialize SQLite database with all tables"""
+    # Create directory if it doesn't exist
+    import os
+    os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
+    
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     

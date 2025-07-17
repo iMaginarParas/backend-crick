@@ -421,7 +421,7 @@ def is_valid_upi_id(upi_id: str) -> bool:
 
 @app.get("/")
 async def root():
-    return {"message": "Cricket Betting API", "version": "1.0.0", "status": "active"}
+    return {"message": "Cricket Betting API v2", "version": "1.0.0", "status": "active"}
 
 @app.get("/health")
 async def health_check():

@@ -1,4 +1,4 @@
-# main.py - Complete Cricket Betting Backend with All Features
+# main.py - Complete Cricket Betting Backend
 import os
 import sqlite3
 import hashlib
@@ -6,14 +6,11 @@ import requests
 import asyncio
 import json
 import re
-import csv
-import io
-import zipfile
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import uvicorn
@@ -43,7 +40,6 @@ app.add_middleware(
 
 # ============= PYDANTIC MODELS =============
 class UserCreate(BaseModel):
-    name: str
     mobile: str
     password: str
 
@@ -73,20 +69,6 @@ class CallOffMatch(BaseModel):
     match_id: int
     reason: str
 
-class QRCodeUpdate(BaseModel):
-    qr_image_base64: str
-    upi_id: Optional[str] = None
-    merchant_name: Optional[str] = None
-
-class QRCodeResponse(BaseModel):
-    id: int
-    qr_type: str
-    qr_image_base64: str
-    upi_id: Optional[str]
-    merchant_name: Optional[str]
-    is_active: bool
-    updated_at: str
-
 # ============= DATABASE FUNCTIONS =============
 def init_database():
     """Initialize SQLite database with all tables"""
@@ -97,11 +79,10 @@ def init_database():
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     
-    # Users table with name field
+    # Users table
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name VARCHAR(100) NOT NULL,
         mobile VARCHAR(15) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
         balance DECIMAL(10,2) DEFAULT 0.00,
@@ -214,17 +195,6 @@ def init_database():
     )
     ''')
     
-    # Payment QR table for storing single QR code
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS payment_qr (
-        id INTEGER PRIMARY KEY DEFAULT 1,
-        qr_image_base64 TEXT,
-        upi_id VARCHAR(100),
-        merchant_name VARCHAR(100),
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
     # Insert default settings
     cursor.execute('''
     INSERT OR IGNORE INTO platform_settings (setting_key, setting_value) VALUES
@@ -233,12 +203,6 @@ def init_database():
     ('min_withdrawal_amount', '50'),
     ('betting_closes_hours_before_match', '1'),
     ('welcome_bonus', '10')
-    ''')
-    
-    # Insert default payment QR record
-    cursor.execute('''
-    INSERT OR IGNORE INTO payment_qr (id, upi_id, merchant_name)
-    VALUES (1, 'yourmerchant@paytm', 'Cricket Betting Platform')
     ''')
     
     conn.commit()
@@ -253,61 +217,6 @@ def get_db_connection():
 def hash_password(password: str) -> str:
     """Hash password with SHA256"""
     return hashlib.sha256(password.encode()).hexdigest()
-
-def migrate_add_name_column():
-    """Add name column to existing users table"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Check if column already exists
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if 'name' not in columns:
-        # Add name column with default value
-        cursor.execute("ALTER TABLE users ADD COLUMN name VARCHAR(100) DEFAULT 'User'")
-        conn.commit()
-        print("✅ Name column added to users table")
-    else:
-        print("ℹ️ Name column already exists")
-    
-    conn.close()
-
-def migrate_add_qr_table():
-    """Add QR code table to existing database"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Check if table exists
-    cursor.execute("""
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name='payment_qr'
-    """)
-    
-    if not cursor.fetchone():
-        # Create QR table
-        cursor.execute('''
-        CREATE TABLE payment_qr (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            qr_image_base64 TEXT,
-            upi_id VARCHAR(100),
-            merchant_name VARCHAR(100),
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # Insert default QR
-        cursor.execute('''
-        INSERT INTO payment_qr (id, upi_id, merchant_name)
-        VALUES (1, 'yourmerchant@paytm', 'Cricket Betting Platform')
-        ''')
-        
-        conn.commit()
-        print("✅ QR code table added to database")
-    else:
-        print("ℹ️ QR code table already exists")
-    
-    conn.close()
 
 # ============= CRICKET API FUNCTIONS =============
 async def fetch_upcoming_matches():
@@ -536,11 +445,6 @@ async def register(user_data: UserCreate):
         conn.close()
         raise HTTPException(status_code=400, detail="Invalid mobile number format")
     
-    # Validate name
-    if len(user_data.name.strip()) < 2:
-        conn.close()
-        raise HTTPException(status_code=400, detail="Name must be at least 2 characters long")
-    
     # Check if user exists
     cursor.execute("SELECT id FROM users WHERE mobile = ?", (user_data.mobile,))
     if cursor.fetchone():
@@ -552,8 +456,8 @@ async def register(user_data: UserCreate):
     welcome_bonus = 10.0  # Welcome bonus
     
     cursor.execute(
-        "INSERT INTO users (name, mobile, password, balance) VALUES (?, ?, ?, ?)",
-        (user_data.name.strip(), user_data.mobile, hashed_password, welcome_bonus)
+        "INSERT INTO users (mobile, password, balance) VALUES (?, ?, ?)",
+        (user_data.mobile, hashed_password, welcome_bonus)
     )
     
     user_id = cursor.lastrowid
@@ -562,8 +466,7 @@ async def register(user_data: UserCreate):
     
     return {
         "message": "Registration successful", 
-        "user_id": user_id,
-        "name": user_data.name,
+        "user_id": user_id, 
         "welcome_bonus": welcome_bonus,
         "mobile": user_data.mobile
     }
@@ -579,7 +482,6 @@ async def login(login_data: UserLogin):
         "message": "Login successful", 
         "user": {
             "id": user["id"],
-            "name": user["name"],
             "mobile": user["mobile"],
             "balance": user["balance"]
         }
@@ -773,27 +675,6 @@ async def get_my_bets(current_user: dict = Depends(get_current_user)):
     conn.close()
     return {"bets": bets}
 
-# ============= PAYMENT QR =============
-
-@app.get("/payment-qr")
-async def get_payment_qr():
-    """Get payment QR code"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM payment_qr WHERE id = 1")
-    qr_data = cursor.fetchone()
-    conn.close()
-    
-    if not qr_data or not qr_data['qr_image_base64']:
-        raise HTTPException(404, "QR code not configured")
-    
-    return {
-        "qr_image": qr_data['qr_image_base64'],
-        "upi_id": qr_data['upi_id'],
-        "merchant_name": qr_data['merchant_name']
-    }
-
 # ============= BALANCE MANAGEMENT =============
 
 @app.post("/request-deposit")
@@ -814,15 +695,6 @@ async def request_deposit(deposit_data: BalanceRequest, current_user: dict = Dep
     """, (current_user['id'], deposit_data.amount))
     
     request_id = cursor.lastrowid
-    
-    # Get active QR code
-    cursor.execute("""
-        SELECT qr_image_base64, upi_id, merchant_name 
-        FROM payment_qr 
-        WHERE id = 1
-    """)
-    qr_code = cursor.fetchone()
-    
     conn.commit()
     conn.close()
     
@@ -830,12 +702,7 @@ async def request_deposit(deposit_data: BalanceRequest, current_user: dict = Dep
         "message": "Deposit request submitted successfully",
         "request_id": request_id,
         "amount": deposit_data.amount,
-        "payment_qr": {
-            "qr_image_base64": qr_code['qr_image_base64'] if qr_code else None,
-            "upi_id": qr_code['upi_id'] if qr_code else None,
-            "merchant_name": qr_code['merchant_name'] if qr_code else None
-        },
-        "note": "Please scan the QR code to pay and admin will approve your request"
+        "note": "Please pay the amount and admin will approve your request"
     }
 
 @app.post("/request-withdrawal")
@@ -934,6 +801,37 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
         "betting_stats": stats
     }
 
+# Add test endpoint for debugging API response
+@app.get("/admin/debug-api")
+async def debug_cricket_api(admin_password: str):
+    """Debug cricket API response format"""
+    if admin_password != ADMIN_PASSWORD:
+        raise HTTPException(401, "Invalid admin password")
+    
+    try:
+        matches = await fetch_upcoming_matches()
+        return {
+            "total_matches": len(matches),
+            "sample_matches": matches[:3] if matches else [],
+            "first_match_keys": list(matches[0].keys()) if matches else [],
+            "api_working": True
+        }
+    except Exception as e:
+        return {"error": str(e), "api_working": False}
+
+# Add manual trigger for testing
+@app.post("/admin/manual-update")
+async def manual_cricket_update(admin_password: str):
+    """Manually trigger cricket data update for testing"""
+    if admin_password != ADMIN_PASSWORD:
+        raise HTTPException(401, "Invalid admin password")
+    
+    try:
+        await daily_cricket_update()
+        return {"message": "Cricket data update completed successfully"}
+    except Exception as e:
+        return {"message": f"Update failed: {str(e)}"}
+
 # ============= ADMIN ENDPOINTS =============
 
 @app.get("/admin/dashboard")
@@ -964,14 +862,6 @@ async def admin_dashboard(admin_password: str):
     cursor.execute("SELECT COALESCE(SUM(balance), 0) as total_user_balance FROM users")
     total_user_balance = cursor.fetchone()['total_user_balance']
     
-    # Get active QR code info
-    cursor.execute("""
-        SELECT upi_id, merchant_name, last_updated 
-        FROM payment_qr 
-        WHERE id = 1
-    """)
-    qr_info = cursor.fetchone()
-    
     conn.close()
     
     return {
@@ -980,14 +870,10 @@ async def admin_dashboard(admin_password: str):
         "pending_withdrawals": pending_withdrawals,
         "active_bets": active_bets,
         "total_matches": total_matches,
-        "total_user_balance": total_user_balance,
-        "active_qr": {
-            "upi_id": qr_info['upi_id'] if qr_info else None,
-            "merchant_name": qr_info['merchant_name'] if qr_info else None,
-            "last_updated": qr_info['last_updated'] if qr_info else None
-        }
+        "total_user_balance": total_user_balance
     }
 
+# Add this endpoint for testing - put it near other admin endpoints
 @app.post("/admin/manual-update")
 async def manual_cricket_update(admin_password: str):
     """Manually trigger cricket data update for testing"""
@@ -1010,7 +896,7 @@ async def get_deposit_requests(admin_password: str):
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT br.*, u.name, u.mobile, u.balance as current_balance
+        SELECT br.*, u.mobile, u.balance as current_balance
         FROM balance_requests br
         JOIN users u ON br.user_id = u.id
         WHERE br.status = 'pending' AND br.type = 'deposit'
@@ -1089,7 +975,7 @@ async def get_withdrawal_requests(admin_password: str):
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT wr.*, u.name, u.mobile, u.balance as current_balance
+        SELECT wr.*, u.mobile, u.balance as current_balance
         FROM withdrawal_requests wr
         JOIN users u ON wr.user_id = u.id
         WHERE wr.status = 'pending'
@@ -1203,7 +1089,7 @@ async def get_match_bets(match_id: int, admin_password: str):
     
     # Get all bets for this match
     cursor.execute("""
-        SELECT b.*, u.name, u.mobile
+        SELECT b.*, u.mobile
         FROM bets b
         JOIN users u ON b.user_id = u.id
         WHERE b.match_id = ?
@@ -1367,375 +1253,7 @@ async def call_off_match(call_off_data: CallOffMatch, admin_password: str):
         "total_refunded": total_refunded
     }
 
-# ============= ADMIN QR CODE MANAGEMENT =============
-
-@app.post("/admin/update-qr")
-async def update_qr(
-    qr_image_base64: str,
-    upi_id: str,
-    merchant_name: str = "Cricket Betting Platform",
-    admin_password: str = None
-):
-    """Update payment QR code"""
-    if admin_password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-    
-    # Basic size check (2MB as base64 ≈ 2.7MB)
-    if len(qr_image_base64) > 3 * 1024 * 1024:  # 3MB limit
-        raise HTTPException(400, "Image too large. Maximum 2MB allowed")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        UPDATE payment_qr 
-        SET qr_image_base64 = ?, upi_id = ?, merchant_name = ?, last_updated = datetime('now')
-        WHERE id = 1
-    """, (qr_image_base64, upi_id, merchant_name))
-    
-    conn.commit()
-    conn.close()
-    
-    return {
-        "message": "QR code updated successfully",
-        "upi_id": upi_id
-    }
-
-@app.get("/admin/payment-qr")
-async def get_admin_payment_qr(admin_password: str):
-    """Admin gets current QR code details"""
-    if admin_password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM payment_qr WHERE id = 1")
-    qr_code = cursor.fetchone()
-    conn.close()
-    
-    if not qr_code:
-        return {"message": "No QR code found", "qr_code": None}
-    
-    return {
-        "qr_code": dict(qr_code)
-    }
-
-# ============= ADMIN REPORTS =============
-
-@app.get("/admin/reports/users")
-async def download_users_report(admin_password: str):
-    """Download all users data as CSV"""
-    if admin_password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get all users with stats
-    cursor.execute("""
-        SELECT 
-            u.id,
-            u.name,
-            u.mobile,
-            u.balance,
-            u.created_at,
-            COUNT(DISTINCT b.id) as total_bets,
-            COALESCE(SUM(b.bet_amount), 0) as total_wagered,
-            COUNT(DISTINCT CASE WHEN b.status = 'won' THEN b.id END) as bets_won,
-            COALESCE(SUM(CASE WHEN b.status = 'won' THEN b.potential_winnings ELSE 0 END), 0) as total_winnings
-        FROM users u
-        LEFT JOIN bets b ON u.id = b.user_id
-        GROUP BY u.id
-        ORDER BY u.created_at DESC
-    """)
-    
-    users = cursor.fetchall()
-    conn.close()
-    
-    # Create CSV
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Write headers
-    writer.writerow([
-        'User ID', 'Name', 'Mobile', 'Current Balance', 'Registration Date',
-        'Total Bets', 'Total Wagered', 'Bets Won', 'Total Winnings', 'Win Rate %'
-    ])
-    
-    # Write data
-    for user in users:
-        win_rate = (user['bets_won'] / user['total_bets'] * 100) if user['total_bets'] > 0 else 0
-        writer.writerow([
-            user['id'],
-            user['name'],
-            user['mobile'],
-            f"₹{user['balance']:.2f}",
-            user['created_at'],
-            user['total_bets'],
-            f"₹{user['total_wagered']:.2f}",
-            user['bets_won'],
-            f"₹{user['total_winnings']:.2f}",
-            f"{win_rate:.1f}%"
-        ])
-    
-    output.seek(0)
-    
-    return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=users_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        }
-    )
-
-@app.get("/admin/reports/bets")
-async def download_bets_report(admin_password: str, status: str = None):
-    """Download all bets data as CSV"""
-    if admin_password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    query = """
-        SELECT 
-            b.id,
-            u.name as user_name,
-            u.mobile,
-            m.match_title,
-            m.team1,
-            m.team2,
-            b.predicted_winner,
-            b.predicted_player,
-            b.bet_amount,
-            b.potential_winnings,
-            b.status,
-            b.created_at,
-            m.winner as actual_winner,
-            m.player_of_match as actual_player
-        FROM bets b
-        JOIN users u ON b.user_id = u.id
-        JOIN matches m ON b.match_id = m.id
-    """
-    
-    if status:
-        query += f" WHERE b.status = '{status}'"
-    
-    query += " ORDER BY b.created_at DESC"
-    
-    cursor.execute(query)
-    bets = cursor.fetchall()
-    conn.close()
-    
-    # Create CSV
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Write headers
-    writer.writerow([
-        'Bet ID', 'User Name', 'Mobile', 'Match', 'Team 1', 'Team 2',
-        'Predicted Winner', 'Predicted Player', 'Bet Amount', 'Potential Win',
-        'Status', 'Bet Date', 'Actual Winner', 'Actual Player'
-    ])
-    
-    # Write data
-    for bet in bets:
-        writer.writerow([
-            bet['id'],
-            bet['user_name'],
-            bet['mobile'],
-            bet['match_title'],
-            bet['team1'],
-            bet['team2'],
-            bet['predicted_winner'],
-            bet['predicted_player'],
-            f"₹{bet['bet_amount']:.2f}",
-            f"₹{bet['potential_winnings']:.2f}",
-            bet['status'].upper(),
-            bet['created_at'],
-            bet['actual_winner'] or 'Pending',
-            bet['actual_player'] or 'Pending'
-        ])
-    
-    output.seek(0)
-    
-    filename = f"bets_report_{status + '_' if status else ''}{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    
-    return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
-
-@app.get("/admin/reports/financial")
-async def download_financial_report(admin_password: str):
-    """Download financial summary report"""
-    if admin_password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get deposits
-    cursor.execute("""
-        SELECT 
-            br.id,
-            u.name,
-            u.mobile,
-            br.amount,
-            br.status,
-            br.created_at,
-            br.processed_at,
-            br.admin_notes
-        FROM balance_requests br
-        JOIN users u ON br.user_id = u.id
-        WHERE br.type = 'deposit'
-        ORDER BY br.created_at DESC
-    """)
-    deposits = cursor.fetchall()
-    
-    # Get withdrawals
-    cursor.execute("""
-        SELECT 
-            wr.id,
-            u.name,
-            u.mobile,
-            wr.amount,
-            wr.upi_id,
-            wr.status,
-            wr.requested_at,
-            wr.processed_at,
-            wr.admin_notes
-        FROM withdrawal_requests wr
-        JOIN users u ON wr.user_id = u.id
-        ORDER BY wr.requested_at DESC
-    """)
-    withdrawals = cursor.fetchall()
-    
-    # Get summary stats
-    cursor.execute("""
-        SELECT 
-            (SELECT COALESCE(SUM(amount), 0) FROM balance_requests WHERE type = 'deposit' AND status = 'approved') as total_deposits,
-            (SELECT COALESCE(SUM(amount), 0) FROM withdrawal_requests WHERE status = 'completed') as total_withdrawals,
-            (SELECT COALESCE(SUM(balance), 0) FROM users) as total_user_balance,
-            (SELECT COALESCE(SUM(bet_amount), 0) FROM bets) as total_bet_volume,
-            (SELECT COALESCE(SUM(potential_winnings), 0) FROM bets WHERE status = 'won') as total_payouts
-    """)
-    summary = cursor.fetchone()
-    conn.close()
-    
-    # Create CSV with multiple sheets-like sections
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Summary section
-    writer.writerow(['FINANCIAL SUMMARY'])
-    writer.writerow(['Metric', 'Amount'])
-    writer.writerow(['Total Deposits', f"₹{summary['total_deposits']:.2f}"])
-    writer.writerow(['Total Withdrawals', f"₹{summary['total_withdrawals']:.2f}"])
-    writer.writerow(['User Wallet Balance', f"₹{summary['total_user_balance']:.2f}"])
-    writer.writerow(['Total Bet Volume', f"₹{summary['total_bet_volume']:.2f}"])
-    writer.writerow(['Total Winnings Paid', f"₹{summary['total_payouts']:.2f}"])
-    writer.writerow([])  # Empty row
-    
-    # Deposits section
-    writer.writerow(['DEPOSIT HISTORY'])
-    writer.writerow(['ID', 'User Name', 'Mobile', 'Amount', 'Status', 'Request Date', 'Processed Date', 'Notes'])
-    for dep in deposits:
-        writer.writerow([
-            dep['id'], dep['name'], dep['mobile'], f"₹{dep['amount']:.2f}",
-            dep['status'], dep['created_at'], dep['processed_at'] or 'N/A', dep['admin_notes'] or ''
-        ])
-    writer.writerow([])
-    
-    # Withdrawals section
-    writer.writerow(['WITHDRAWAL HISTORY'])
-    writer.writerow(['ID', 'User Name', 'Mobile', 'Amount', 'UPI ID', 'Status', 'Request Date', 'Processed Date', 'Notes'])
-    for wd in withdrawals:
-        writer.writerow([
-            wd['id'], wd['name'], wd['mobile'], f"₹{wd['amount']:.2f}",
-            wd['upi_id'], wd['status'], wd['requested_at'], wd['processed_at'] or 'N/A', wd['admin_notes'] or ''
-        ])
-    
-    output.seek(0)
-    
-    return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=financial_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        }
-    )
-
-@app.get("/admin/reports/matches")
-async def download_matches_report(admin_password: str):
-    """Download matches report with betting statistics"""
-    if admin_password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT 
-            m.id,
-            m.match_title,
-            m.team1,
-            m.team2,
-            m.match_date,
-            m.venue,
-            m.status,
-            m.winner,
-            m.player_of_match,
-            m.called_off,
-            COUNT(DISTINCT b.id) as total_bets,
-            COUNT(DISTINCT b.user_id) as unique_bettors,
-            COALESCE(SUM(b.bet_amount), 0) as total_amount,
-            COUNT(CASE WHEN b.status = 'won' THEN 1 END) as winning_bets,
-            COALESCE(SUM(CASE WHEN b.status = 'won' THEN b.potential_winnings ELSE 0 END), 0) as total_payouts
-        FROM matches m
-        LEFT JOIN bets b ON m.id = b.match_id
-        GROUP BY m.id
-        ORDER BY m.match_date DESC
-    """)
-    
-    matches = cursor.fetchall()
-    conn.close()
-    
-    # Create CSV
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    writer.writerow([
-        'Match ID', 'Title', 'Team 1', 'Team 2', 'Date', 'Venue', 'Status',
-        'Winner', 'Player of Match', 'Called Off', 'Total Bets', 'Unique Bettors',
-        'Total Amount', 'Winning Bets', 'Total Payouts', 'House Edge'
-    ])
-    
-    for match in matches:
-        house_edge = match['total_amount'] - match['total_payouts']
-        writer.writerow([
-            match['id'], match['match_title'], match['team1'], match['team2'],
-            match['match_date'], match['venue'], match['status'],
-            match['winner'] or 'TBD', match['player_of_match'] or 'TBD',
-            'Yes' if match['called_off'] else 'No',
-            match['total_bets'], match['unique_bettors'],
-            f"₹{match['total_amount']:.2f}", match['winning_bets'],
-            f"₹{match['total_payouts']:.2f}", f"₹{house_edge:.2f}"
-        ])
-    
-    output.seek(0)
-    
-    return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=matches_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        }
-    )
-
-# Add test endpoint for debugging API response
+# Add this test endpoint for debugging API response
 @app.get("/admin/debug-api")
 async def debug_cricket_api(admin_password: str):
     """Debug cricket API response format"""
@@ -1752,6 +1270,19 @@ async def debug_cricket_api(admin_password: str):
         }
     except Exception as e:
         return {"error": str(e), "api_working": False}
+
+# Add manual trigger for testing
+@app.post("/admin/manual-update")
+async def manual_cricket_update(admin_password: str):
+    """Manually trigger cricket data update for testing"""
+    if admin_password != ADMIN_PASSWORD:
+        raise HTTPException(401, "Invalid admin password")
+    
+    try:
+        await daily_cricket_update()
+        return {"message": "Cricket data update completed successfully"}
+    except Exception as e:
+        return {"message": f"Update failed: {str(e)}"}
 
 # ============= CRON JOB / SCHEDULER =============
 
@@ -1893,10 +1424,6 @@ async def startup_event():
     # Initialize database
     print("📊 Initializing database...")
     init_database()
-    
-    # Run migrations
-    migrate_add_name_column()
-    migrate_add_qr_table()
     
     # Setup scheduler for daily updates
     scheduler = AsyncIOScheduler()
